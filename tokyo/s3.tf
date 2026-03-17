@@ -34,26 +34,6 @@ resource "aws_s3_bucket_ownership_controls" "audit_ownership" {
 # Fetch CloudFront's canonical user ID — this is the zero trust approach.
 # No canned ACLs. Only CloudFront's specific identity gets write access.
 data "aws_cloudfront_log_delivery_canonical_user_id" "cf_logs" {}
-data "aws_canonical_user_id" "current" {}
-
-resource "aws_s3_bucket_acl" "audit_acl" {
-  depends_on = [aws_s3_bucket_ownership_controls.audit_ownership]
-  bucket     = aws_s3_bucket.audit_bucket.id
-
-  access_control_policy {
-    owner {
-      id = data.aws_canonical_user_id.current.id
-    }
-
-    grant {
-      grantee {
-        id   = data.aws_cloudfront_log_delivery_canonical_user_id.cf_logs.id
-        type = "CanonicalUser"
-      }
-      permission = "FULL_CONTROL"
-    }
-  }
-}
 
 resource "aws_s3_bucket_public_access_block" "audit_block" {
   bucket                  = aws_s3_bucket.audit_bucket.id

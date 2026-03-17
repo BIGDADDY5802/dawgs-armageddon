@@ -27,13 +27,40 @@ resource "aws_s3_bucket_ownership_controls" "audit_ownership" {
   bucket = aws_s3_bucket.audit_bucket.id
 
   rule {
-    object_ownership = "BucketOwnerPreferred"
+    # ObjectWriter required for CloudFront log delivery via ACL.
+    # BucketOwnerPreferred blocks the CloudFront delivery principal from writing.
+    object_ownership = "ObjectWriter"
   }
 }
 
 # Fetch CloudFront's canonical user ID — this is the zero trust approach.
 # No canned ACLs. Only CloudFront's specific identity gets write access.
 data "aws_cloudfront_log_delivery_canonical_user_id" "cf_logs" {}
+
+# Grant CloudFront's delivery identity write access via ACL.
+# Must come after ownership_controls and public_access_block.
+resource "aws_s3_bucket_acl" "audit_acl" {
+  bucket = aws_s3_bucket.audit_bucket.id
+
+  access_control_policy {
+    owner {
+      id = data.aws_cloudfront_log_delivery_canonical_user_id.cf_logs.id
+    }
+
+    grant {
+      grantee {
+        id   = data.aws_cloudfront_log_delivery_canonical_user_id.cf_logs.id
+        type = "CanonicalUser"
+      }
+      permission = "FULL_CONTROL"
+    }
+  }
+
+  depends_on = [
+    aws_s3_bucket_ownership_controls.audit_ownership,
+    aws_s3_bucket_public_access_block.audit_block,
+  ]
+}
 
 resource "aws_s3_bucket_public_access_block" "audit_block" {
   bucket                  = aws_s3_bucket.audit_bucket.id

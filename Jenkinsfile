@@ -9,22 +9,22 @@
 // Four-stage apply sequence (matches lab3b_apply_walkthrough.md exactly):
 //
 //   Stage 1 — São Paulo base infrastructure
-//             Liberdade/ with all defaults (no peering flags)
+//             saopaulo/ with all defaults (no peering flags)
 //             Writes: /lab/liberdade/tgw/id to SSM sa-east-1
 //
 //   Stage 2 — Tokyo full stack + peering request
-//             Shinjuku/ with saopaulo_tgw_ready=true
+//             tokyo/ with saopaulo_tgw_ready=true
 //             Writes: /lab/shinjuku/tgw/peering-attachment-id to SSM ap-northeast-1
 //
 //   Stage 3 — São Paulo accepts peering
-//             Liberdade/ with tokyo_peering_attachment_ready=true
+//             saopaulo/ with tokyo_peering_attachment_ready=true
 //             Accepts TGW peering, adds TGW route to Tokyo CIDR
 //
 //   [GATE]  — Wait for TGW attachment to reach 'available' in ap-northeast-1
 //             Polls SSM for attachment ID then calls describe-transit-gateway-attachments
 //
 //   Stage 4 — Tokyo return route
-//             Shinjuku/ with saopaulo_tgw_ready=true tokyo_peering_accepted=true
+//             tokyo/ with saopaulo_tgw_ready=true tokyo_peering_accepted=true
 //             Adds return route 10.190.0.0/16 → TGW in Tokyo private RT
 //
 // Zero trust principles applied:
@@ -44,8 +44,8 @@ pipeline {
     USEAST_REGION = 'us-east-1'
 
     // Directory names must match your repo layout exactly
-    SP_DIR    = 'Liberdade'
-    TOKYO_DIR = 'Shinjuku'
+    SP_DIR    = 'saopaulo'
+    TOKYO_DIR = 'tokyo'
 
     // TGW wait timeout in seconds — peering propagation takes 1-5 minutes
     TGW_WAIT_TIMEOUT = '600'
@@ -91,13 +91,13 @@ pipeline {
           sh '''
             snyk auth $SNYK_TOKEN
 
-            echo "=== Scanning Liberdade (São Paulo) ==="
+            echo "=== Scanning saopaulo (São Paulo) ==="
             snyk iac test $SP_DIR/ \
               --severity-threshold=high \
               --report \
               || true
 
-            echo "=== Scanning Shinjuku (Tokyo) ==="
+            echo "=== Scanning tokyo (Tokyo) ==="
             snyk iac test $TOKYO_DIR/ \
               --severity-threshold=high \
               --report \
@@ -516,10 +516,10 @@ pipeline {
          to identify the correct recovery path.
 
          Destroy order (MUST follow this sequence):
-           1. cd Shinjuku && terraform destroy
+           1. cd tokyo && terraform destroy
                 -var saopaulo_tgw_ready=true
                 -var tokyo_peering_accepted=true
-           2. cd Liberdade && terraform destroy
+           2. cd saopaulo && terraform destroy
         ============================================
       '''
     }

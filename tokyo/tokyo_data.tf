@@ -29,11 +29,3 @@ data "aws_ec2_transit_gateway_route_table" "shinjuku_default_rt" {
     values = ["true"]
   }
 }
-
-data "terraform_remote_state" "saopaulo_state" {
-  backend = "remote"
-
-  config = {
-    path = "./saopaulo/terraform.tfstate"
-  }
-}

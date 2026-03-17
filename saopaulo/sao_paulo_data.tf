@@ -55,11 +55,3 @@ data "aws_ssm_parameter" "tokyo_rds_endpoint" {
   provider = aws.tokyo
   name     = "/lab/tokyo/db/endpoint"
 }
-
-data "terraform_remote_state" "tokyo_state" {
-  backend = "remote"
-
-  config = {
-    path = "./tokyo/terraform.tfstate"
-  }
-}

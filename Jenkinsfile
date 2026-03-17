@@ -9,11 +9,11 @@
 // Four-stage apply sequence (matches lab3b_apply_walkthrough.md exactly):
 //
 //   Stage 1 — São Paulo base infrastructure
-//             saopaulo/ with all defaults (no peering flags)
+//             saopaulo/ with tokyo_peering_attachment_ready=false
 //             Writes: /lab/liberdade/tgw/id to SSM sa-east-1
 //
 //   Stage 2 — Tokyo full stack + peering request
-//             tokyo/ with saopaulo_tgw_ready=true
+//             tokyo/ with saopaulo_tgw_ready=true, tokyo_peering_accepted=false
 //             Writes: /lab/shinjuku/tgw/peering-attachment-id to SSM ap-northeast-1
 //
 //   Stage 3 — São Paulo accepts peering
@@ -24,8 +24,12 @@
 //             Polls SSM for attachment ID then calls describe-transit-gateway-attachments
 //
 //   Stage 4 — Tokyo return route
-//             tokyo/ with saopaulo_tgw_ready=true tokyo_peering_accepted=true
+//             tokyo/ with saopaulo_tgw_ready=true, tokyo_peering_accepted=true
 //             Adds return route 10.190.0.0/16 → TGW in Tokyo private RT
+//
+// Variable declarations per stack:
+//   saopaulo/ declares: tokyo_peering_attachment_ready
+//   tokyo/    declares: saopaulo_tgw_ready, tokyo_peering_accepted
 //
 // Zero trust principles applied:
 //   - No static AWS credentials — EC2 instance profile only (STS temporary creds)
@@ -80,10 +84,6 @@ pipeline {
     // Scans both regional stacks for Terraform misconfigurations.
     // --severity-threshold=high fails the pipeline on HIGH or CRITICAL findings.
     // LOW and MEDIUM findings are reported but do not block deployment.
-    //
-    // Snyk requires an API token stored in Jenkins Credentials
-    // (credentialsId: 'snyk-token'). This is the one credential that must
-    // live in Jenkins — Snyk is a third-party service and cannot use IAM.
     // =========================================================================
     stage('Snyk IaC Scan') {
       steps {
@@ -118,13 +118,11 @@ pipeline {
     // Deploys: VPC, subnets, IGW, NAT, TGW, VPC attachment, EC2, ALB,
     //          security groups, CloudWatch log group, SNS, SSM /lab/liberdade/tgw/id
     //
-    // Variables: all defaults — saopaulo_tgw_ready=false,
-    //            tokyo_peering_attachment_ready=false
-    //            (peering and secret resources are gated, do not exist yet)
+    // São Paulo variable: tokyo_peering_attachment_ready=false
+    //   Peering accepter and secret resources are gated — do not exist yet.
     //
     // Output consumed by Stage 2:
     //   /lab/liberdade/tgw/id in SSM sa-east-1
-    //   Tokyo reads this to initiate the peering request
     // =========================================================================
     stage('Stage 1 - São Paulo Base') {
       steps {
@@ -137,7 +135,6 @@ pipeline {
             terraform init -input=false
 
             terraform plan \
-              -var="saopaulo_tgw_ready=false" \
               -var="tokyo_peering_attachment_ready=false" \
               -input=false \
               -out=sp-stage1.tfplan
@@ -162,17 +159,14 @@ pipeline {
     //
     // Deploys: VPC, subnets, RDS (PHI vault — ap-northeast-1 only), EC2, ALB,
     //          TGW, TGW peering attachment (initiates handshake to São Paulo),
-    //          Secrets Manager (DB secret + origin cloaking secret),
-    //          CloudFront, WAF, CloudTrail, ACM cert, Route 53, SSM parameters
+    //          Secrets Manager, CloudFront, WAF, CloudTrail, ACM, Route53, SSM
     //
-    // Variables: saopaulo_tgw_ready=true
-    //   Enables data.aws_ssm_parameter.liberdade_tgw_id (reads Stage 1 output)
-    //   Enables aws_ec2_transit_gateway_peering_attachment (initiates peering)
-    //   Enables aws_ssm_parameter.tgw_peering_attachment_id (writes for Stage 3)
+    // Tokyo variables:
+    //   saopaulo_tgw_ready=true     — reads Stage 1 SSM output, creates peering
+    //   tokyo_peering_accepted=false — return route not yet added
     //
     // Output consumed by Stage 3:
     //   /lab/shinjuku/tgw/peering-attachment-id in SSM ap-northeast-1
-    //   São Paulo reads this to accept the peering
     // =========================================================================
     stage('Stage 2 - Tokyo Full Stack') {
       steps {
@@ -209,16 +203,12 @@ pipeline {
     // STAGE 3 — SÃO PAULO ACCEPTS PEERING
     //
     // Reads:   /lab/shinjuku/tgw/peering-attachment-id from SSM ap-northeast-1
-    // Creates: TGW peering accepter (explicit consent — never assumed)
-    //          TGW static route: 10.52.0.0/16 → peering attachment
-    //          ALB listener rule: X-Chewbacca-Growl header check
+    // Creates: TGW peering accepter, TGW static route to Tokyo CIDR,
+    //          ALB listener rule (X-Chewbacca-Growl header check),
     //          SSM parameters mirroring Tokyo RDS endpoint and port
     //
-    // Variables: tokyo_peering_attachment_ready=true
-    //   Enables data.aws_ssm_parameter.tokyo_tgw_peering_attachment_id
-    //   Enables aws_ec2_transit_gateway_peering_attachment_accepter
-    //   Enables aws_ec2_transit_gateway_route.saopaulo_to_tokyo
-    //   Enables aws_lb_listener_rule.liberdade_require_origin_header
+    // São Paulo variable: tokyo_peering_attachment_ready=true
+    //   Enables peering accepter and route resources.
     // =========================================================================
     stage('Stage 3 - São Paulo Accepts Peering') {
       steps {
@@ -229,7 +219,6 @@ pipeline {
             echo "=============================="
 
             terraform plan \
-              -var="saopaulo_tgw_ready=false" \
               -var="tokyo_peering_attachment_ready=true" \
               -input=false \
               -out=sp-stage3.tfplan
@@ -249,19 +238,11 @@ pipeline {
     // Zero trust: verify actual state before proceeding — never trust the plan.
     //
     // AWS takes 1-5 minutes to propagate peering acceptance from São Paulo
-    // back to Tokyo. Adding a static route to an attachment that is still
-    // in 'pendingAcceptance' or 'pending' state fails silently — the route
-    // is created but traffic never flows.
+    // back to Tokyo. Adding a static route to an attachment still in
+    // 'pendingAcceptance' state fails silently — route is created but
+    // traffic never flows.
     //
-    // This gate:
-    //   1. Reads the peering attachment ID from SSM (no hardcoded IDs)
-    //   2. Polls describe-transit-gateway-attachments in ap-northeast-1
-    //      until state == 'available'
-    //   3. Only then passes control to Stage 4
-    //
-    // Timeout: 10 minutes (TGW_WAIT_TIMEOUT=600). If TGW does not reach
-    // 'available' within this window, the pipeline fails rather than
-    // proceeding with a broken corridor.
+    // Timeout: 10 minutes (TGW_WAIT_TIMEOUT=600).
     // =========================================================================
     stage('Gate - Wait for TGW Available') {
       steps {
@@ -313,11 +294,10 @@ pipeline {
     //
     // Creates: TGW static route in Tokyo route table:
     //            10.190.0.0/16 → peering attachment
-    //          This is the return path — without it, RDS responses from Tokyo
-    //          never reach São Paulo EC2. The corridor is one-way until this runs.
     //
-    // Variables: saopaulo_tgw_ready=true + tokyo_peering_accepted=true
-    //   Enables aws_ec2_transit_gateway_route.tokyo_to_saopaulo (tokyo_tgw.tf)
+    // Tokyo variables:
+    //   saopaulo_tgw_ready=true      — keeps existing resources in place
+    //   tokyo_peering_accepted=true  — enables return route resource
     //
     // After this stage the full corridor is bidirectional:
     //   São Paulo EC2 → TGW → Tokyo RDS (route added in Stage 3)
@@ -350,8 +330,7 @@ pipeline {
     // =========================================================================
     // VERIFY DEPLOYMENT
     //
-    // Mirrors the verification commands from lab3b_apply_walkthrough.md.
-    // These check actual live infrastructure — not plan outputs.
+    // Checks actual live infrastructure — not plan outputs.
     //
     // Checks:
     //   1. RDS exists in Tokyo (APPI: PHI in Japan)
@@ -441,8 +420,8 @@ pipeline {
     // =========================================================================
     // AUDIT EVIDENCE
     //
-    // Runs the Malgus evidence scripts from lab3b_apply_walkthrough.md.
-    // Output archived as build artifacts — these are the APPI compliance deliverables.
+    // Runs Malgus evidence scripts. Output archived as build artifacts —
+    // these are the APPI compliance deliverables.
     //
     // Scripts expected at repo root:
     //   malgus_residency_proof.py
@@ -520,6 +499,7 @@ pipeline {
                 -var saopaulo_tgw_ready=true
                 -var tokyo_peering_accepted=true
            2. cd saopaulo && terraform destroy
+                -var tokyo_peering_attachment_ready=true
         ============================================
       '''
     }
